@@ -22,6 +22,7 @@ import android.content.res.Configuration
 import android.location.Location
 import android.os.Bundle
 import android.util.Log
+import android.view.View
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -196,28 +197,53 @@ public fun GoogleMap(
                 mapView.log("Creating MapView")
                 mapView.registerAndSaveNewComponentCallbacks(context)
 
-                // Used to observe lifecycle owner's lifecycle state and
-                // to gradually move between states.
-                mapView.tagData().lifecycleRegistry = DerivedLifecycleRegistry(lifecycleOwner) { _, event ->
-                    mapView.log("Invoking $event")
-                    when (event) {
-                        Lifecycle.Event.ON_CREATE -> mapView.onCreate(Bundle())
-                        Lifecycle.Event.ON_START -> mapView.onStart()
-                        Lifecycle.Event.ON_RESUME -> mapView.onResume()
-                        Lifecycle.Event.ON_PAUSE -> mapView.onPause()
-                        Lifecycle.Event.ON_STOP -> mapView.onStop()
-                        Lifecycle.Event.ON_DESTROY -> {
-                            mapView.onDestroy()
-                            mapView.tagData().lifecycleRegistry!!.destroy()
+                val lifecycleRegistry = LifecycleRegistry(lifecycleOwner)
+
+                val lifecycleOwnerEventObserver = LifecycleEventObserver { _, event ->
+                    lifecycleRegistry.handleLifecycleEvent(event)
+                }
+
+                val mapLifecycleEventObserver = object : LifecycleEventObserver {
+                    override fun onStateChanged(source: LifecycleOwner, event: Lifecycle.Event) {
+                        mapView.log("Invoking event $event")
+
+                        when (event) {
+                            Lifecycle.Event.ON_CREATE -> mapView.onCreate(Bundle())
+                            Lifecycle.Event.ON_START -> mapView.onStart()
+                            Lifecycle.Event.ON_RESUME -> mapView.onResume()
+                            Lifecycle.Event.ON_PAUSE -> mapView.onPause()
+                            Lifecycle.Event.ON_STOP -> mapView.onStop()
+                            Lifecycle.Event.ON_DESTROY -> {
+                                mapView.onDestroy()
+                                lifecycleOwner.lifecycle.removeObserver(lifecycleOwnerEventObserver)
+                                lifecycleRegistry.removeObserver(this)
+                            }
+
+                            else -> error("Unsupported Lifecycle.Event: $event")
                         }
-                        else -> error("Unsupported Lifecycle.Event: $event")
                     }
+                }
+
+                lifecycleRegistry.addObserver(mapLifecycleEventObserver)
+
+                mapView.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+                    override fun onViewAttachedToWindow(v: View) {
+                        lifecycleOwner.lifecycle.addObserver(lifecycleOwnerEventObserver)
+                    }
+
+                    override fun onViewDetachedFromWindow(v: View) {
+                        lifecycleOwner.lifecycle.removeObserver(lifecycleOwnerEventObserver)
+                        lifecycleRegistry.currentState = Lifecycle.State.CREATED
+                    }
+                })
+
+                mapView.tagData().onRelease = {
+                    lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
                 }
             }
         },
         onReset = { mapView ->
             // View is detached.
-            mapView.tagData().lifecycleRegistry!!.overrideLifecycleState(Lifecycle.State.CREATED)
         },
         onRelease = { mapView ->
             mapView.log("onRelease")
@@ -227,7 +253,7 @@ public fun GoogleMap(
                     tagData.mapViewContext?.unregisterComponentCallbacks(componentCallbacks)
                 }
 
-                tagData.lifecycleRegistry!!.destroy()
+                mapView.tagData().onRelease!!.invoke()
             }
 
             mapView.tag = null
@@ -239,8 +265,6 @@ public fun GoogleMap(
                 debugMapId = mapView.tagData().debugId
                 mapUpdaterScope.launchComposition(mapView)
             }
-
-            mapView.tagData().lifecycleRegistry!!.clearOverwrittenLifecycleState()
         }
     )
 
@@ -310,7 +334,7 @@ private fun MapView.registerAndSaveNewComponentCallbacks(context: Context) {
 internal data class MapTagData(
     var componentCallbacks: ComponentCallbacks?,
     var mapViewContext: Context?,
-    var lifecycleRegistry: DerivedLifecycleRegistry?,
+    var onRelease: (() -> Unit)?,
     val debugId: Int = nextId
 ) {
     companion object {
